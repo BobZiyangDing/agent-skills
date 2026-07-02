@@ -54,7 +54,13 @@ absent, fall back to `pip install -r "<SKILL_BASE_DIR>/requirements.txt"` then
 `python3 "<SKILL_BASE_DIR>/scripts/fetch_macro.py" TICKER`.
 
 It prints all required quant indicators (spec §2.1), ratios/spreads/term structure,
-and a per-asset section (5d/20d move, SMA/EMA, ATR expected move, option-implied move).
+a per-asset section (5d/20d move, SMA/EMA, ATR expected move, option-implied move),
+and an auto FLOW CALENDAR flag (month/quarter-end pension & index rebalance proximity).
+
+**INSTANTANEOUS DATA RULE**: this is a fast now-or-not decision. All prices/indicators
+are fetched as live last-quotes (latest 1-minute bar), never yesterday's close when
+the market is open. The script prints per-quote timestamps and flags STALE fallbacks —
+relay any staleness to the user instead of presenting old numbers as current.
 
 Then fetch the **non-quant** items (spec §2.2) via **WebSearch** — only the ones
 relevant to the user's hold horizon:
@@ -69,51 +75,76 @@ Interpret everything using `reference/indicators.md`. Produce a one-line **regim
 ## Step 3 — Scenario-tree PnL, exhaustively enumerated (spec §3.1)
 
 **Max/min PnL must be DERIVED from an enumerated scenario set — never hand-waved,
-never "assume ±X% and multiply".** Run the scenario engine:
+never "assume ±X% and multiply".** Run the scenario engine.
+
+**INTRADAY mode — MANDATORY whenever the entry is late-session (after ~14:30 ET), the
+user names an entry time, or today is within 3 days of a month/quarter end:**
 
 ```bash
-# option
 uv run --with yfinance --with pandas-market-calendars python3 \
   "<SKILL_BASE_DIR>/scripts/scenario_pnl.py" \
-  --ticker SPY --type call --strike 748 --expiry 2026-07-07 \
-  --entry-price 1.40 --qty 91 --account 51234 --sleep-pct 10
-
-# stock:  --type stock --days 10 --entry-price 190 --qty 500
-# 2x LETF: --type letf --leverage 2 --days 5 --entry-price 12 --qty 4000
+  --ticker SPY --type call --strike 754 --expiry 2026-07-07 \
+  --entry-time 15:45 --entry-price 0.77 --qty 133 --account 51234 --sleep-pct 10
+# backtests: add --asof YYYY-MM-DD; flow-heavy nights: --overnight-var-share 0.5
 ```
 
-The engine builds the **real timeline** (every remaining NYSE session to the
-horizon, holiday/half-day aware, locked gaps marked), a **per-step move grid**
-(±2σ/±1σ/0 from implied vol, normal-discretized probabilities), then enumerates
-**every path** through the tree, reprices the instrument at **every node**
-(Black-Scholes for options; daily-reset compounding for LETFs), and outputs:
-[A] timeline, [B] move grid, [C] the full scenario table (path → S_end → value →
-PnL$ → account Δ% → probability, sleep-line breaches flagged), [D] an exit matrix
-(PnL range at each actable checkpoint), [E] summary (MAX/MIN/EXPECTED PnL,
-P(loss), P(sleep-line breach), each tied to its exact path and probability).
+Intraday mode enumerates the REAL microstructure of the first ~24h — this is the
+whole point (spec §3.2): **seg1** entry→16:00 close auction (auto-flags month/
+quarter-end pension & index rebalance flows), **seg2** 16:00→16:15 late-close
+window (actable ONLY for SPY/QQQ/IWM/DIA/SPX-class options; single-name options
+are already locked), **seg3** 16:15→9:30 OVERNIGHT — LOCKED while futures/Asia
+(KR NPS, JP GPIF at quarter turn)/Europe move the underlying, **seg4** 9:30→10:30
+next-morning dip-buy window, **seg5** rest of day, then daily chunks to expiry.
+Every segment gets its own sigma (overnight = `--overnight-var-share`, default 35%
+of a day's variance; raise to 0.5 on flow-heavy nights) and its own branches;
+every path is repriced node-by-node.
+
+**DAILY mode** (entry not late-session): same command without `--entry-time`.
+`--type stock --days 10` / `--type letf --leverage 2 --days 5` for non-options.
+
+Outputs: [A] segment timeline with ACTABLE/LOCKED + flow warnings, [B] move grid,
+[C] full scenario table (sleep-line breaches flagged), [D] exit matrix per
+checkpoint, [E] MAX/MIN/EXPECTED PnL + P(loss) + P(sleep-breach), and — intraday
+only — **[F] ENTRY-TIMING COMPARISON**: the same budget deployed as
+enter-NOW / enter-at-late-close(16:14) / wait-buy-10:30-tomorrow / wait-buy-ONLY-
+if-overnight-dipped≤−1σ, with expected PnL per overnight scenario and P(loss) per
+strategy. **[F] is the decision output** — it turns "该现在买还是等明早的 dip" into
+derived numbers.
 
 Present to the user, in this order:
-1. **[A] Timeline** — the checkpoints and locked windows, so they see exactly *when* they can act.
-2. **[C] Scenario table** — all paths if ≤ ~25, else the top/bottom 10; call out the
-   *surprising* middle paths (e.g. "涨了一半仍然亏 90%" 类路径), not just the extremes.
-3. **[E] Summary** — max/min/expected PnL and P(sleep-line breach), stated as derived
+1. **[A] Timeline** — segments, when they can act, where the flow risks sit.
+2. **[C] Scenario table** — all paths if ≤ ~25, else top/bottom; call out the
+   *surprising* middle paths (e.g. "涨了一半仍然亏 90%" 类路径), not just extremes.
+3. **[F] Entry-timing comparison** (intraday) — which entry strategy dominates and why.
+4. **[E] Summary** — max/min/expected PnL and P(sleep-line breach), stated as derived
    from the enumeration.
 - If the user gave their own up/down targets, run the engine's numbers AND their
   targets side by side and show the gap.
 - **Sleep test:** use P(breach) and MAX damage from [E]. If breach probability is
   material (not just the worst path), say plainly: **this size is too big for you**.
 - **Make the loss concrete:** "= 约 X 天/周 你最近的组合 PnL"。
+- **Interpret [F] honestly — the engine is drift-free.** It prices no mean-reversion,
+  so "buy the dip" shows only the cheaper-entry advantage. If the overnight dip is
+  FLOW-DRIVEN (pension/index rebalance — mechanical, not informational), state that
+  mean-reversion odds favor the dip-buyer beyond what [F] shows. Also note the
+  engine holds the strike constant for comparability; in practice, after a dip you
+  re-strike ATM relative to the NEW spot (同样的钱买到更近的 strike + 更多张数),
+  which further favors waiting.
 - State the engine's caveats honestly (constant IV, discretized probabilities).
 
-## Step 4 — End-of-day "locked-out" timing scenarios (spec §3.2)
+## Step 4 — Lockout & flow narrative (spec §3.2)
 
-Only if the entry is a **late-session** operation. Use the tables in
-`reference/indicators.md` §5 for the instrument type:
-- **Options (RTH):** 3:55–4pm actable → 4pm–9:30am LOCKED → 9:30–9:35am (gap already in). Note Late-Close/PM-settled shifts the lock to 4:15pm.
-- **Leveraged ETF (ETH):** 7:55–8pm actable → 8pm–7am LOCKED → 7:00–7:05am reopen. Plus daily-reset decay overnight.
-- **正股/正ETF (24h):** skip enumeration; note overnight slippage/thin-liquidity only.
+For late-session option entries this is now **computed by intraday mode** ([A]
+timeline + [F] comparison) — your job here is the narrative on top of the numbers:
+- Walk the user through *their* locked window: "16:15 之后你动不了,而隔夜恰好是
+  [季末亚洲养老金 / 大盘 futures] 最活跃的时段" — tie the [A] flow warnings to the
+  [F] overnight scenarios.
+- **Leveraged ETF (ETH):** engine daily mode + manual note: 7:55–8pm actable →
+  8pm–7am LOCKED → 7:00am reopen; daily-reset decay compounds overnight.
+- **正股/正ETF (24h):** skip enumeration; note overnight slippage/thin liquidity only.
 
-Quantify: "如果现在进,盘后 gap 对你 X%,而你被锁住无法操作,损失 = $__ / 账户 __%。能否盘前对冲?"
+Quantify from [D]/[F]: "如果现在进,一个 −1σ/−2σ 隔夜 gap = $__ / 账户 __%,发生时你
+无法操作;等到明早 10:30 再决定的期望差值 = $__。"
 
 ## Step 5 — Debate (spec §4)
 
@@ -173,5 +204,13 @@ write a log even if the user walks away.
 5. **Be honest about data gaps** — if VIXEQ/COR1M history or an option chain is thin, say so; never fabricate a level.
 7. **PnL numbers come from the scenario engine's enumeration, period.** If the engine
    can't run (no data), say so and present a manually-enumerated scenario table in the
-   same [A]-[E] structure — still path-by-path, never a bare "best/worst guess".
+   same [A]-[F] structure — still path-by-path, never a bare "best/worst guess".
+8. **Instantaneous numbers only.** Every price/indicator you present is the live
+   last-quote at decision time, with its timestamp. Never present a close or any
+   stale number as "current" — if a feed is stale, say so explicitly. 这是一个快速的
+   当下判断,旧数据会直接导致错误的 timing 决策。
+9. **Timing is a first-class output.** For late-session entries, always deliver the
+   [F] entry-timing comparison (enter now vs late-close vs wait-for-morning-dip) and
+   the flow-calendar context (month/quarter-end pension, Asia-session flows). "现在
+   不买,明早 dip 再买大" 必须作为一个被定量比较过的选项呈现,而不是事后诸葛。
 6. **Always disclaim:** 以上为纪律性风控辅助，非投资建议，盈亏自负。

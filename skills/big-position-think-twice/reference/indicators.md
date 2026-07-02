@@ -80,30 +80,47 @@ How to read it with the user:
 - Honest caveats every time: constant IV (no crush/spike), discretized probabilities,
   close-to-close steps.
 
-## 5. Timing scenarios — end-of-day "stuck" risk (spec §3.2)
+## 5. Timing — intraday segments, lockout windows, and WHO moves the price while you sleep (spec §3.2)
 
-Only enumerate if the entry is a **late-session** operation (the risk being: you get filled, then markets close and you *cannot act* on news for hours). If it's a normal intraday entry in a 24h-tradable name, skip.
+Only enumerate if the entry is a **late-session** operation. The engine's intraday
+mode (`--entry-time`) computes all of this; this section is the mental model.
 
-**A. Options (RTH-settled, most single-name options):**
-| Window | Can act? | Overnight gap risk |
-|---|---|---|
-| 3:55–4:00pm | yes, closing | last chance to size/exit before the bell |
-| 4:00pm–9:30am next day | **NO** (unless Late-Close/PM-settled) | full overnight + pre-market gap, unhedgeable |
-| 9:30–9:35am | yes | gap already happened at the open |
+### The segment map for a late-session index-option entry (ET)
 
-If a **Late-Close / PM-settled** option exists (e.g. index options to 4:15pm), the no-act window shifts to 4:15pm→9:30am; you get 15 extra min.
+| Segment | Window | Can act? | What moves the price here |
+|---|---|---|---|
+| close auction | entry→16:00 | ✅ | **MOC imbalances; month/quarter-end pension & index rebalance flows** (mechanical dumps/pumps into the bell) |
+| late close | 16:00→16:15 | ✅ *only* SPY/QQQ/IWM/DIA/SPX/XSP/NDX/RUT-class options | thin, but it's your last exit ("SF 1:15pm" = 4:15pm ET) |
+| **overnight** | 16:15→9:30 | ❌ **LOCKED** | ES/NQ futures 24h; **Asia session (KR NPS, JP GPIF quarter-turn rebalancing, China headlines)**; Europe open. A flow-driven dump can hit while you cannot touch the option |
+| morning window | 9:30→10:30 | ✅ | gap realized; **this is the dip-buy window** |
+| rest of day | 10:30→16:00 | ✅ | normal tape |
 
-**B. Leveraged single-stock ETFs (e.g. daily-reset LETFs) — extended hours:**
-| Window | Can act? |
-|---|---|
-| 7:55–8:00pm | yes (ETH close approaching) |
-| 8:00pm–7:00am | **NO** — no ETH liquidity |
-| 7:00–7:05am | yes (ETH reopen) |
-Plus daily-reset decay: holding a LETF overnight compounds against you on a reversal.
+Single-name options lose the late-close row (locked from 16:00). Daily closes look
+flat while hiding a huge overnight dip — **the daily candle lies; the segment map doesn't.**
 
-**C. Regular stock + regular ETF (24h / round-the-clock venues):** tradable essentially anytime — do **not** enumerate stuck-windows; the risk is slippage/thin liquidity overnight, not being locked out.
+### Flow calendar (mechanical, schedulable — check every run)
+- **Month-end / quarter-end (±3 days):** US pensions rebalance into the close auction;
+  Asia pensions (KR NPS, JP GPIF) rebalance in THEIR session = your locked overnight.
+  Quarter-end (Mar/Jun/Sep/Dec) is the big one. 6/30 尾盘砸 + 半夜韩国养老金接着砸
+  就是这个形态。
+- **Index rebalances:** S&P/Nasdaq/Russell quarterly, 3rd Friday of Mar/Jun/Sep/Dec
+  (Russell reconstitution late June) — massive MOC prints.
+- Flow-driven moves are **mechanical, not informational** → elevated mean-reversion
+  odds next morning. This is why "wait for the morning dip, then size up (re-strike
+  ATM at the new spot)" beats "buy the close" around these dates — the engine's [F]
+  table shows the cheaper-entry effect; the mean-reversion effect comes ON TOP of it
+  (the engine is drift-free — say so).
 
-The point of this section: quantify **"if I enter now and it gaps against me while I'm locked out, what's the damage, and can I pre-hedge it?"**
+**B. Leveraged single-stock ETFs (daily-reset, ETH-traded):**
+7:55–8pm actable → 8pm–7am **LOCKED** (no ETH liquidity) → 7:00am reopen; plus
+daily-reset decay compounds against you on reversals.
+
+**C. Regular stock + regular ETF (24h venues):** no lockout enumeration; the risk is
+overnight slippage/thin liquidity, not being locked out.
+
+The deliverables: (1) "if I enter now, a −1σ/−2σ overnight gap costs $__ / account __%
+while I'm locked", (2) the [F] strategy comparison — enter now vs late-close vs
+wait-for-dip, (3) whether tonight is a flow night.
 
 ## 6. Debate (spec §4) & conclusion (spec §5)
 Run an honest two-sided debate:

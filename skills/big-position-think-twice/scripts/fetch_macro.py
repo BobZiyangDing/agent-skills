@@ -71,6 +71,32 @@ except Exception:
     HAVE_YF = False
 
 
+def live_last(ticker):
+    """INSTANTANEOUS last price. Tries the latest 1-minute bar (works for
+    indices and equities intraday), falls back to fast_info, then daily close.
+    Returns (price, timestamp_str, is_fresh)."""
+    try:
+        t = yf.Ticker(ticker)
+        h = t.history(period="1d", interval="1m")
+        if h is not None and not h.empty:
+            ts = h.index[-1]
+            age_min = (dt.datetime.now(ts.tzinfo) - ts).total_seconds() / 60.0
+            return float(h["Close"].iloc[-1]), ts.strftime("%H:%M %Z"), age_min < 30
+    except Exception:
+        pass
+    try:
+        p = yf.Ticker(ticker).fast_info.get("last_price")
+        if p and p > 0:
+            return float(p), "fast_info", True
+    except Exception:
+        pass
+    try:
+        h = yf.Ticker(ticker).history(period="5d")
+        return float(h["Close"].iloc[-1]), f"close {h.index[-1].date()} (STALE)", False
+    except Exception:
+        return None, "N/A", False
+
+
 def yf_hist(ticker, period="3mo"):
     try:
         h = yf.Ticker(ticker).history(period=period, auto_adjust=False)
@@ -126,21 +152,26 @@ def macro_dashboard():
         print("!! yfinance not available; rerun with: uv run --with yfinance --with requests")
         return
 
-    # Pull the yahoo-based series
-    tk = {
-        "VIX":    yf_hist("^VIX"),
-        "VIX9D":  yf_hist("^VIX9D"),
-        "VIX3M":  yf_hist("^VIX3M"),
-        "VVIX":   yf_hist("^VVIX"),
-        "VIXEQ":  yf_hist("^VIXEQ"),
-        "MOVE":   yf_hist("^MOVE"),
-        "COR1M":  yf_hist("^COR1M"),
-        "COR3M":  yf_hist("^COR3M"),
-        "HYG":    yf_hist("HYG"),
-        "IEI":    yf_hist("IEI"),
+    # Pull the yahoo-based series (dailies for 5d changes) + INSTANTANEOUS lasts
+    SYMS = {
+        "VIX": "^VIX", "VIX9D": "^VIX9D", "VIX3M": "^VIX3M", "VVIX": "^VVIX",
+        "VIXEQ": "^VIXEQ", "MOVE": "^MOVE", "COR1M": "^COR1M", "COR3M": "^COR3M",
+        "HYG": "HYG", "IEI": "IEI",
     }
-    v = {k: last_close(h) for k, h in tk.items()}
+    tk = {k: yf_hist(s) for k, s in SYMS.items()}
+    live = {k: live_last(s) for k, s in SYMS.items()}
+    v, stale = {}, []
+    for k in SYMS:
+        lp, lts, fresh = live[k]
+        if lp is not None and fresh:
+            v[k] = lp
+        else:
+            v[k] = last_close(tk[k])
+            stale.append(f"{k}({lts})")
     c5 = {k: pct_change_ndays(h, 5) for k, h in tk.items()}
+    fresh_ts = [live[k][1] for k in SYMS if live[k][2]]
+    print(f"  quotes: INSTANTANEOUS (latest 1m bar{', e.g. ' + fresh_ts[0] if fresh_ts else ''})"
+          + (f"  !! STALE fallbacks: {', '.join(stale)}" if stale else "  — all fresh"))
 
     def line(label, val, chg5, note):
         print(f"  {label:<26} {_f(val):>10}   5d {_pct(chg5):>8}   {note}")
@@ -205,9 +236,19 @@ def macro_dashboard():
     print(f"  {'SOFR-IORB (bps)':<26} {_f(spread_bps,1):>10}   {'':>12}   {flag_sofr(spread_bps)}")
 
     print("\n" + "-" * 66)
+    today = dt.date.today()
+    nxt_m = (today.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+    d_to_me = (nxt_m - today).days
+    q_end_month = today.month in (3, 6, 9, 12)
+    print("FLOW CALENDAR (auto):")
+    if d_to_me <= 3:
+        kind = "QUARTER-END" if q_end_month else "MONTH-END"
+        print(f"  !! {kind} in {d_to_me} day(s): expect pension/index rebalance flows in")
+        print(f"     US close auctions AND overnight Asia sessions (KR NPS / JP GPIF)")
+    else:
+        print(f"  month-end in {d_to_me} days (no imminent rebalance-flow window)")
     print("NON-QUANT (fetch separately via WebSearch — not in this script):")
-    print("  * Index rebalancing dates (S&P/Nasdaq quarterly; watch month/quarter-end)")
-    print("  * Pension fund rebalancing (month/quarter-end flows)")
+    print("  * Index rebalancing dates (S&P/Nasdaq quarterly, 3rd Friday of Mar/Jun/Sep/Dec)")
     print("  * Pending Fed events (next FOMC, speeches, minutes, data prints)")
     print("-" * 66)
 
@@ -247,8 +288,9 @@ def asset_section(ticker):
     if h is None:
         print("  no data")
         return
-    px = last_close(h)
-    print(f"  Last close:        {_f(px)}")
+    lp, lts, fresh = live_last(ticker)
+    px = lp if (lp is not None and fresh) else last_close(h)
+    print(f"  Last:              {_f(px)}   [{'LIVE ' + lts if fresh else 'STALE: ' + lts}]")
     print(f"  5-day move:        {_pct(pct_change_ndays(h,5))}")
     print(f"  20-day move:       {_pct(pct_change_ndays(h,20))}")
     print(f"  SMA20 / EMA20:     {_f(sma(h,20))} / {_f(ema(h,20))}   (px {'ABOVE' if (px and sma(h,20) and px>sma(h,20)) else 'below'} SMA20)")
