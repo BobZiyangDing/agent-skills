@@ -117,6 +117,9 @@ def main():
     ap.add_argument("--r", type=float, default=0.04)
     ap.add_argument("--max-steps", type=int, default=3,
                     help="compress trading days into at most this many steps")
+    ap.add_argument("--asof", help="YYYY-MM-DD: simulate entry at this session's close "
+                    "(backtest mode; spot auto-fetched from history, IV should be "
+                    "passed via --iv or current chain IV is used as a proxy)")
     ap.add_argument("--grid", default="2,1,0",
                     help="sigma multiples (mirrored), '2,1,0' -> +2,+1,0,-1,-2")
     args = ap.parse_args()
@@ -128,13 +131,25 @@ def main():
         sys.exit("stock/letf needs --days")
     mult = args.multiplier if args.multiplier is not None else (100.0 if is_opt else 1.0)
 
+    asof = dt.date.fromisoformat(args.asof) if args.asof else None
+
     # ---- spot & iv (auto-fetch if needed) ----
     spot, iv = args.spot, args.iv
     if spot is None or (is_opt and iv is None):
         import yfinance as yf
         tk = yf.Ticker(args.ticker)
         if spot is None:
-            spot = float(tk.history(period="1d")["Close"].iloc[-1])
+            if asof:
+                h = tk.history(start=asof.isoformat(),
+                               end=(asof + dt.timedelta(days=4)).isoformat())
+                if h.empty or h.index[0].date() != asof:
+                    sys.exit(f"no session close found for --asof {asof}")
+                spot = float(h["Close"].iloc[0])
+            else:
+                spot = float(tk.history(period="1d")["Close"].iloc[-1])
+        if is_opt and iv is None and asof:
+            print(f"  [warn] --asof backtest: historical IV unavailable, "
+                  f"using CURRENT chain IV as proxy", file=sys.stderr)
         if is_opt and iv is None:
             try:
                 ch = tk.option_chain(args.expiry)
@@ -149,7 +164,7 @@ def main():
         rets = [math.log(b / a) for a, b in zip(h[:-1], h[1:])]
         iv = statistics.stdev(rets) * math.sqrt(252)
 
-    today = dt.date.today()
+    today = asof if asof else dt.date.today()
     horizon = dt.date.fromisoformat(args.expiry) if is_opt else None
 
     # ---- timeline: remaining NYSE sessions ----
@@ -157,9 +172,13 @@ def main():
         sessions = nyse_sessions(today, horizon)
     else:
         sessions = nyse_sessions(today, today + dt.timedelta(days=args.days * 2 + 15))
-    # drop today's session if its close already passed
-    now_utc = dt.datetime.now(dt.timezone.utc)
-    sessions = [s for s in sessions if s[1] > now_utc]
+    if asof:
+        # backtest: entry AT the asof close -> enumerate sessions strictly after
+        sessions = [s for s in sessions if s[0] > asof]
+    else:
+        # live: drop today's session if its close already passed
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        sessions = [s for s in sessions if s[1] > now_utc]
     if not is_opt:
         sessions = sessions[: args.days]
     if not sessions:
@@ -189,8 +208,9 @@ def main():
     label = (f"{args.ticker} {args.expiry} {args.strike:g}{'C' if args.type=='call' else 'P'}"
              if is_opt else f"{args.ticker} {args.type}"
              + (f" {args.leverage:g}x" if args.type == "letf" else ""))
+    mode = f"  [BACKTEST as of {asof} close]" if asof else ""
     print(f"SCENARIO TREE — {label}  |  spot {spot:.2f}  IV {iv*100:.1f}%  "
-          f"sigma/day ${sigma_day:.2f} ({100*sigma_day/spot:.2f}%)")
+          f"sigma/day ${sigma_day:.2f} ({100*sigma_day/spot:.2f}%){mode}")
     print(f"position: {args.qty:g} x {mult:g} @ {args.entry_price:g}  "
           f"= cost ${args.qty*mult*args.entry_price:,.0f}"
           + (f"  |  account ${args.account:,.0f}" if args.account else ""))
