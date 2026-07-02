@@ -1,5 +1,6 @@
-# Python deps for big-position-think-twice/scripts/fetch_macro.py
-# Preferred runtime is `uv run --with yfinance --with requests` (no install needed).
+# Python deps for big-position-think-twice/scripts/ (fetch_macro.py, scenario_pnl.py)
+# Preferred runtime is `uv run --with <pkg>` (no install needed).
 # This file is the pip fallback for environments without uv.
 yfinance>=0.2.40
 requests>=2.31
+pandas-market-calendars>=4.3

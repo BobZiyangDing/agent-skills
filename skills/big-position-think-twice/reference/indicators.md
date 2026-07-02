@@ -45,18 +45,40 @@ The single most valuable pattern for this skill: **low VIX + high VIXEQ/VIX + ri
 
 ---
 
-## 4. PnL math (spec §3.1 & §5.2)
+## 4. PnL math (spec §3.1 & §5.2) — scenario-tree enumeration
 
-**Expected-move band** for the asset comes two ways (script prints both):
-1. **Option-implied:** `move = price × ATM_IV × sqrt(days_to_horizon / 365)`. Preferred when the name is liquid & optionable.
-2. **ATR-based:** `move ≈ ATR(14) × sqrt(trading_days)`. Fallback / sanity check.
+**The rule: max/min PnL are *derived* from an exhaustively enumerated scenario set,
+never assumed.** `scripts/scenario_pnl.py` is the engine; its model:
 
-Then:
-- **Best-case PnL** ≈ position_notional × (+move% ) — or use the user's stated upside target if given (do BOTH, show the gap).
-- **Worst-case PnL** ≈ position_notional × (−move%), and for leveraged/optioned exposure use the instrument's delta/leverage, not the underlying %.
-- **Translate to account:** `account Δ% = position_PnL / account_equity`. This is the number that matters.
-- **Sleep test:** compare worst-case `account Δ%` to the user's stated "茶饭不思" drawdown %. If worst-case ≥ sleep threshold → the position is too big *for this person*, independent of whether the thesis is right.
-- **Context the loss:** express the worst-case $ loss as "= X days/weeks of your recent portfolio PnL" so it's felt, not abstract.
+- **Time axis:** every remaining NYSE session between now and the horizon/expiry
+  (holiday & half-day aware), compressed into ≤ `--max-steps` steps. Checkpoints are
+  session closes — the only moments you can act. Every step *contains* the locked
+  overnight/weekend gap that precedes it, which is exactly the lockout structure of §5.
+- **Move axis:** per step, sigma-multiples {+2σ, +1σ, 0, −1σ, −2σ} where
+  `σ_step = spot × IV × sqrt(sessions_in_step / 252)`; each branch gets its
+  normal-discretized probability (≈7/24/38/24/7%).
+- **Paths:** the full cartesian product (branches^steps). Each path is repriced at
+  every node — Black-Scholes for options (constant IV), daily-reset compounding for
+  LETFs (decay emerges naturally), linear for stock.
+- **Outputs:** [A] timeline+locked gaps, [B] move grid, [C] full path table with
+  PnL$/accountΔ%/probability per path and sleep-line breaches flagged, [D] exit matrix
+  per checkpoint, [E] MAX/MIN/EXPECTED PnL + P(loss) + P(sleep-breach), each tied to
+  its exact path.
+
+How to read it with the user:
+- The extremes ([E] MAX/MIN) come with their **path and probability** — a +157% path at
+  0.4% probability is a lottery ticket, not a scenario to size for.
+- The **middle paths** are where the surprises live (e.g. "+1σ then flat" still losing
+  ~90% on a short-dated OTM option). Call these out explicitly.
+- **Sleep test:** judge on **P(breach)** and MAX damage together, not just the worst
+  path. Material breach probability (say >20–30%) = position too big *for this person*,
+  independent of thesis.
+- **ATR cross-check:** the dashboard's ATR expected move should roughly bracket the
+  engine's ±1σ path endpoints; a large mismatch means the IV input is stale — say so.
+- **Context the loss:** express worst-case $ as "= X days/weeks of your recent portfolio
+  PnL" so it's felt, not abstract.
+- Honest caveats every time: constant IV (no crush/spike), discretized probabilities,
+  close-to-close steps.
 
 ## 5. Timing scenarios — end-of-day "stuck" risk (spec §3.2)
 

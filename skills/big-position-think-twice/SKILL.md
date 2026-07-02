@@ -66,18 +66,44 @@ Interpret everything using `reference/indicators.md`. Produce a one-line **regim
 🟢 add-risk OK / 🟡 fragile calm / 🔴 de-risk. Call out loudly the danger pattern:
 **low VIX + high VIXEQ/VIX + rising COR1M + widening CCC−BB** = calm surface, unstable interior.
 
-## Step 3 — PnL math against the account (spec §3.1)
+## Step 3 — Scenario-tree PnL, exhaustively enumerated (spec §3.1)
 
-Using the expected-move bands from the script (prefer **option-implied**, sanity-check
-with ATR) — and the user's own upside/downside targets if they gave any (compute BOTH,
-show the gap):
+**Max/min PnL must be DERIVED from an enumerated scenario set — never hand-waved,
+never "assume ±X% and multiply".** Run the scenario engine:
 
-- **Best case / Worst case position PnL** (use the instrument's delta/leverage, not the
-  underlying % — an option or LETF moves multiples of the underlying).
-- **Account Δ%** = position PnL ÷ account equity, both directions.
-- **Sleep test:** worst-case account Δ% vs the user's 茶饭不思线. If worst-case ≥ threshold,
-  state plainly: **this position is too big for you**, regardless of thesis.
+```bash
+# option
+uv run --with yfinance --with pandas-market-calendars python3 \
+  "<SKILL_BASE_DIR>/scripts/scenario_pnl.py" \
+  --ticker SPY --type call --strike 748 --expiry 2026-07-07 \
+  --entry-price 1.40 --qty 91 --account 51234 --sleep-pct 10
+
+# stock:  --type stock --days 10 --entry-price 190 --qty 500
+# 2x LETF: --type letf --leverage 2 --days 5 --entry-price 12 --qty 4000
+```
+
+The engine builds the **real timeline** (every remaining NYSE session to the
+horizon, holiday/half-day aware, locked gaps marked), a **per-step move grid**
+(±2σ/±1σ/0 from implied vol, normal-discretized probabilities), then enumerates
+**every path** through the tree, reprices the instrument at **every node**
+(Black-Scholes for options; daily-reset compounding for LETFs), and outputs:
+[A] timeline, [B] move grid, [C] the full scenario table (path → S_end → value →
+PnL$ → account Δ% → probability, sleep-line breaches flagged), [D] an exit matrix
+(PnL range at each actable checkpoint), [E] summary (MAX/MIN/EXPECTED PnL,
+P(loss), P(sleep-line breach), each tied to its exact path and probability).
+
+Present to the user, in this order:
+1. **[A] Timeline** — the checkpoints and locked windows, so they see exactly *when* they can act.
+2. **[C] Scenario table** — all paths if ≤ ~25, else the top/bottom 10; call out the
+   *surprising* middle paths (e.g. "涨了一半仍然亏 90%" 类路径), not just the extremes.
+3. **[E] Summary** — max/min/expected PnL and P(sleep-line breach), stated as derived
+   from the enumeration.
+- If the user gave their own up/down targets, run the engine's numbers AND their
+  targets side by side and show the gap.
+- **Sleep test:** use P(breach) and MAX damage from [E]. If breach probability is
+  material (not just the worst path), say plainly: **this size is too big for you**.
 - **Make the loss concrete:** "= 约 X 天/周 你最近的组合 PnL"。
+- State the engine's caveats honestly (constant IV, discretized probabilities).
 
 ## Step 4 — End-of-day "locked-out" timing scenarios (spec §3.2)
 
@@ -145,4 +171,7 @@ write a log even if the user walks away.
 3. **Weight direction & speed of change** over absolute indicator levels; use 52w percentile when ambiguous.
 4. **Do not declare a debate winner.** Present the single most crucial point of each side and let the user own the decision.
 5. **Be honest about data gaps** — if VIXEQ/COR1M history or an option chain is thin, say so; never fabricate a level.
+7. **PnL numbers come from the scenario engine's enumeration, period.** If the engine
+   can't run (no data), say so and present a manually-enumerated scenario table in the
+   same [A]-[E] structure — still path-by-path, never a bare "best/worst guess".
 6. **Always disclaim:** 以上为纪律性风控辅助，非投资建议，盈亏自负。
