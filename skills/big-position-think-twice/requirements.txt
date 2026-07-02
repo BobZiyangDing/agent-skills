@@ -1,0 +1,5 @@
+# Python deps for big-position-think-twice/scripts/fetch_macro.py
+# Preferred runtime is `uv run --with yfinance --with requests` (no install needed).
+# This file is the pip fallback for environments without uv.
+yfinance>=0.2.40
+requests>=2.31

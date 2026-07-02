@@ -1,0 +1,12 @@
+# runtime output
+**/logs/*
+!**/logs/.gitkeep
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+
+# os
+.DS_Store
