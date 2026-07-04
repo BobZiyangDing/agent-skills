@@ -1,6 +1,6 @@
 ---
 name: big-position-think-twice
-description: A discipline gate to run BEFORE entering a large / conviction position. Interrogates the user's intent and pain threshold, pulls a required macro risk dashboard (VIX, VIXEQ/VIX dispersion, COR1M, MOVE, HYG/IEI, CCC-BB credit spread, SOFR-IORB funding + VIX term structure), computes best/worst-case PnL vs the account, enumerates end-of-day "locked-out" timing scenarios, runs an honest pro/con debate, and outputs the single most crucial point of each side plus the best-execution strategy (timing, hedging, Kelly-capped-by-sleep-test sizing). Read-only — never places orders. Triggers when the user is about to make a big bet, a max position, an all-in / high-conviction trade, asks "should I size up on X", "how big should this position be", "I want to go big on X", "думаю о крупной позиции", "大仓位", "重仓", "梭哈", "要不要上大仓位", "梭一把", "position sizing before earnings", or otherwise signals an outsized entry they might regret.
+description: A discipline gate to run BEFORE entering a large / conviction position. Interrogates the user's intent and pain threshold, pulls a required macro risk dashboard (VIX, VIXEQ/VIX dispersion, COR1M, MOVE, HYG/IEI, CCC-BB credit spread, SOFR-IORB funding + VIX term structure), computes best/worst-case PnL vs the account, enumerates end-of-day "locked-out" timing scenarios, runs a LIVE two-agent adversarial debate (spawns a 正方 and 反方 subagent that actually argue across multiple rebuttal rounds), and outputs each side's surviving point, the objective post-debate takeaway, plus the best-execution strategy (timing, hedging, Kelly-capped-by-sleep-test sizing). Read-only — never places orders. Triggers when the user is about to make a big bet, a max position, an all-in / high-conviction trade, asks "should I size up on X", "how big should this position be", "I want to go big on X", "думаю о крупной позиции", "大仓位", "重仓", "梭哈", "要不要上大仓位", "梭一把", "position sizing before earnings", or otherwise signals an outsized entry they might regret.
 ---
 
 # Big Position — Think Twice
@@ -146,11 +146,54 @@ timeline + [F] comparison) — your job here is the narrative on top of the numb
 Quantify from [D]/[F]: "如果现在进,一个 −1σ/−2σ 隔夜 gap = $__ / 账户 __%,发生时你
 无法操作;等到明早 10:30 再决定的期望差值 = $__。"
 
-## Step 5 — Debate (spec §4)
+## Step 5 — Live adversarial debate (spec §4)
 
-Argue **both sides honestly**, strongest form of each:
-- **支持进入方**：为什么一定要现在进?(thesis 强度 / setup / 不对称性 / catalyst timing / 踏空成本)
-- **反对进入方**：为什么一定不要进?(regime 是 🟡/🔴 / size 过不了 sleep test / 锁仓风险无法对冲 / 追高 FOMO / 事件前裸奔)
+Do **not** argue both sides yourself in one pass. Summon **two real subagents** and
+let them actually fight, then judge the transcript. This surfaces cracks a single
+self-authored "on one hand / on the other" pass always papers over.
+
+**5.1 — Build the fact pack (identical for both sides).** One block containing:
+position (ticker / instrument / strike / expiry / qty / cost / % of account), the
+live greeks (delta/theta/gamma/IV), spot + breakeven + trading days left, the
+Step 2 **regime read** (🟢/🟡/🔴 + danger pattern), the Step 3 **[E] max/min/expected
+PnL + P(loss) + P(sleep-breach)** and **[F] entry-timing** numbers, the flow-calendar
+context, and any expert/community views the user follows. **Both agents debate the
+SAME numbers** — they are reasoners, not data-fetchers; never let them invent levels.
+
+**5.2 — Round 1, opening statements (parallel).** Spawn two `general-purpose`
+subagents via the Agent tool, `run_in_background: false` (synchronous — you need
+the text this turn):
+- **正方 (PRO)** — argue FORCEFULLY but HONESTLY to enter/hold at the proposed size.
+- **反方 (CON)** — argue to cut / reduce / roll / wait.
+Give each the identical fact pack, its role, and tell it: this is a real debate, it
+will later see the opponent's arguments and must rebut, reply in Chinese (~250-400
+words), do NOT strawman — make a case the other side would respect, end with its
+single strongest point. Keep each spawn's `agentId` from the result.
+
+**5.3 — Rebuttal rounds (1–2 rounds).** Feed each agent the OTHER's latest statement
+via **SendMessage** (address it by the `agentId` from 5.2) and ask for a direct
+rebuttal: concede what is genuinely true, attack the specific weak links, don't
+repeat the opening, end with the strongest counter. Point each agent at the
+opponent's *load-bearing* claim (e.g. "rebut their expected-value framing", "is
+cheap convexity still cheap once theta is in?"). **Stop early** the moment a round
+adds no new argument or the two converge — 2–3 total rounds is plenty; more is
+diminishing returns and wasted tokens. Run the two rebuttals of a round in parallel.
+
+**5.4 — Judge the transcript (you, not the agents).** Read both sides across all
+rounds and extract — objectively, without crowning a debater:
+- **each side's surviving claim** — what still stood after the opponent's best attack;
+- **the crux** — what the disagreement is *actually* about. Very often it is NOT
+  direction (both may be bullish) but **instrument / structure / size / timing**;
+- **the objective takeaway** — the single action that satisfies BOTH surviving
+  claims at once (the synthesis), if one exists. A conclusion that lets each side's
+  strongest point remain true is usually the real answer (e.g. "don't cut the
+  *direction*, change the *tool* — roll to a longer-dated / lower-strike / smaller
+  structure" keeps the bull's convexity while removing the bear's theta + zero-risk).
+  If no synthesis exists, state the genuine trade-off the user must own.
+
+**Fallback:** if the Agent tool is unavailable in this runtime, degrade gracefully —
+argue both sides yourself in one honest pass (the pre-multi-agent behavior) and label
+it as such, so the user knows no live debate ran.
 
 ## Step 6 — Conclusion & output (spec §5)
 
@@ -159,9 +202,12 @@ Present in this structure (Chinese):
 ### 🎛️ 宏观 regime
 (the dashboard table + one-line 🟢/🟡/🔴 read + the danger-pattern callout if present)
 
-### ⚖️ 最强论点（不判胜负，只呈现）
-- **支持方最关键的一点**：…
-- **反对方最关键的一点**：…
+### ⚖️ 智力对抗后的 takeaway（来自 Step 5 的实战辩论）
+- **正方存活下来的一点**：…（对方最强攻击后仍站得住的）
+- **反方存活下来的一点**：…
+- **争议的真正焦点（crux）**：…（常常不是方向，而是工具 / 结构 / 仓位 / timing）
+- **🧠 客观 takeaway**：…（同时满足上面两个存活论点的那个动作 = 综合解；若无解，则点明用户必须自己承担的取舍）
+- *(可选)* **一句话复盘思路**：正方祭出 __ → 反方反手用 __ 化解 → 收敛到 __。
 
 ### 📉 假设进入：PnL 与账户冲击
 | 情景 | 标的变动 | 仓位 PnL | 账户 Δ% | vs 茶饭不思线 |
@@ -190,8 +236,9 @@ Present in this structure (Chinese):
 Get timestamp: `date "+%Y-%m-%d_%H%M"`. Write to
 `~/.claude/skills/big-position-think-twice/logs/YYYY-MM-DD_HHMM_TICKER.md`
 with: intake answers, macro dashboard snapshot, regime read, PnL table, timing
-analysis, both sides' crucial points, and the final sizing recommendation. Always
-write a log even if the user walks away.
+analysis, the **debate record** (how many rounds ran, each side's surviving point,
+the crux, and the objective takeaway/synthesis), and the final sizing recommendation.
+Always write a log even if the user walks away.
 
 ---
 
@@ -200,7 +247,12 @@ write a log even if the user walks away.
 1. **Read-only.** Never place, modify, or cancel any order. Suggest; the user executes.
 2. **The sleep test overrides Kelly, always.** Math can say "bet more"; the human's pain threshold caps it.
 3. **Weight direction & speed of change** over absolute indicator levels; use 52w percentile when ambiguous.
-4. **Do not declare a debate winner.** Present the single most crucial point of each side and let the user own the decision.
+4. **Run the debate live, then judge — don't crown a debater.** Step 5 spawns two real
+   subagents that argue across rounds; you referee. Never announce "正方 wins". DO
+   deliver the objective takeaway — the synthesis action that keeps *both* sides'
+   surviving points true (or, if none exists, the honest trade-off). Both agents must
+   debate the same Step 2/3 numbers; they fetch no data and place no orders. If the
+   Agent tool is unavailable, fall back to a single honest two-sided pass and say so.
 5. **Be honest about data gaps** — if VIXEQ/COR1M history or an option chain is thin, say so; never fabricate a level.
 7. **PnL numbers come from the scenario engine's enumeration, period.** If the engine
    can't run (no data), say so and present a manually-enumerated scenario table in the
